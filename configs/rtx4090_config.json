@@ -1,0 +1,86 @@
+{
+    "hardware_config": {
+        "device": "cuda",
+        "memory_config": {
+            "max_split_size_mb": 512,
+            "dtype": "bfloat16"
+        },
+        "optimization": {
+            "enable_tf32": true,
+            "cudnn_benchmark": true,
+            "deterministic": false,
+            "enable_flash_attention": true,
+            "channels_last": true,
+            "compile_model": true,
+            "compile_mode": "max-autotune"
+        }
+    },
+    
+    "distribution_config": {
+        "parallelize_mode": "fsdp",
+        "backend": "nccl",
+        "mixed_precision": "bf16",
+        "sharding_strategy": "full",
+        "cpu_offload": false,
+        "gradient_accumulation": 1,
+        "distributed_evaluation": true,
+        "find_unused_parameters": false,
+        "gradient_as_bucket_view": true
+    },
+    
+    "training_config": {
+        "batch_size_per_gpu": 4,
+        "gradient_accumulation_steps": 1,
+        "progressive_batch_schedule": [
+            {"batch_size": 2, "training_steps": 500},
+            {"batch_size": 4, "training_steps": 2000},
+            {"batch_size": 8, "training_steps": 5000}
+        ],
+        "optimizer": {
+            "type": "adamw",
+            "lr": 1e-4,
+            "weight_decay": 0.01,
+            "use_8bit": false,
+            "use_lion": false,
+            "use_prodigy": false
+        },
+        "scheduler": {
+            "type": "warmup_cosine",
+            "warmup_steps": 100,
+            "min_lr": 1e-6
+        },
+        "precision": "bf16"
+    },
+    
+    "rtx4090_optimizations": {
+        "memory_efficient_fusion": true,
+        "cudnn_benchmark": true,
+        "flash_attention": true,
+        "channels_last_memory_format": true,
+        "enable_tf32": true,
+        "optimize_memory_usage": true,
+        "optimize_attention_implementation": true
+    },
+    
+    "environment": {
+        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512",
+        "NCCL_P2P_LEVEL": "NVL",
+        "OMP_NUM_THREADS": "8",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1"
+    },
+    
+    "advanced_options": {
+        "profile_training": false,
+        "profile_memory": false,
+        "profile_cuda_graphs": false,
+        "enable_checkpointing": true,
+        "checkpoint_frequency": 500,
+        "state_dict_type": "full"
+    },
+    
+    "model_config": {
+        "activation_checkpointing": true,
+        "use_sdpa": true,
+        "sequence_parallel": false
+    }
+} 
