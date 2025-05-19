@@ -62,3 +62,6 @@ togetherai/**
 sd3.5L/*
 sd3.5M/*
 flux_models/*/*
+
+# 数据集目录
+output/
