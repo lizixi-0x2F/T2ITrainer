@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, DistributedSampler
 import random
 import json
 import torch
@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.utils import load_image
+import torch.distributed as dist
+from torch.nn.utils.rnn import pad_sequence 
 
 
 # BASE_RESOLUTION = 1024
@@ -128,12 +130,31 @@ def get_nearest_resolution(image, resolution=1024):
 #referenced from everyDream discord minienglish1 shared script
 #group indices by their corresponding aspect ratio buckets before sampling batches.
 class BucketBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, drop_last=True):
+    def __init__(self, dataset, batch_size, drop_last=True, distributed=False, num_replicas=None, rank=None, seed=0):
         self.dataset = dataset
         self.datarows = dataset.datarows
         self.batch_size = batch_size
         self.drop_last = drop_last
         self.leftover_items = []  #tracks leftover items, without modifying the dataset
+        
+        # 添加分布式支持
+        self.distributed = distributed
+        
+        if self.distributed:
+            if num_replicas is None:
+                if not dist.is_available():
+                    raise RuntimeError("Distributed package not available")
+                num_replicas = dist.get_world_size()
+            if rank is None:
+                if not dist.is_available():
+                    raise RuntimeError("Distributed package not available")
+                rank = dist.get_rank()
+            
+            self.num_replicas = num_replicas
+            self.rank = rank
+            self.epoch = 0
+            self.seed = seed
+        
         self.bucket_indices = self._bucket_indices_by_aspect_ratio() 
 
     #groups dataset indices into buckets based on aspect ratio
@@ -145,8 +166,22 @@ class BucketBatchSampler(Sampler):
                 buckets[closest_bucket_key] = []
             buckets[closest_bucket_key].append(idx) #adds item to bucket
 
+        # 初始随机打乱
+        g = torch.Generator()
+        if self.distributed:
+            g.manual_seed(self.seed + self.epoch)
+        else:
+            g.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
+            
         for bucket in buckets.values(): #shuffles each bucket's contents
-            random.shuffle(bucket)
+            if self.distributed:
+                # 确保不同设备上的顺序一致
+                indices = torch.tensor(bucket, dtype=torch.int64)
+                indices = indices[torch.randperm(len(indices), generator=g)]
+                bucket[:] = indices.tolist()
+            else:
+                random.shuffle(bucket)
+        
         return buckets #returns organized buckets
 
     def __iter__(self): #makes sampler iterable, to be used by PyTorch DataLoader
@@ -166,11 +201,45 @@ class BucketBatchSampler(Sampler):
             self.leftover_items = []  #reset leftover items
         
         all_buckets = list(self.bucket_indices.items())
-        random.shuffle(all_buckets)  #shuffle buckets' order, random bucket each batch
+        
+        # 确保不同进程获得相同的bucket顺序但不同的子集
+        g = torch.Generator()
+        if self.distributed:
+            g.manual_seed(self.seed + self.epoch)
+        else:
+            g.manual_seed(int(torch.empty((), dtype=torch.int64).random_().item()))
+            
+        if self.distributed:
+            # 确保在不同设备上bucket顺序相同
+            indices = torch.tensor(range(len(all_buckets)), dtype=torch.int64)
+            indices = indices[torch.randperm(len(indices), generator=g)]
+            shuffled_buckets = [all_buckets[i] for i in indices.tolist()]
+            all_buckets = shuffled_buckets
+        else:
+            random.shuffle(all_buckets)  #shuffle buckets' order, random bucket each batch
 
         #iterates over buckets, yields when len(batch) == batch size
-        for _, bucket_indices in all_buckets: #iterate each bucket
+        for bucket_key, bucket_indices in all_buckets: #iterate each bucket
             batch = []
+            
+            # 在分布式训练中，每个进程只处理总数据的一部分
+            if self.distributed:
+                # 确保所有进程看到相同的随机序列
+                indices = torch.tensor(bucket_indices, dtype=torch.int64)
+                indices = indices[torch.randperm(len(indices), generator=g)]
+                
+                # 计算每个进程应该处理的样本数量
+                num_samples_per_replica = int(math.ceil(len(indices) / self.num_replicas))
+                total_size = num_samples_per_replica * self.num_replicas
+                
+                # 扩展样本以确保每个进程有相同数量的样本
+                if len(indices) < total_size:
+                    indices = torch.cat([indices, indices[:(total_size - len(indices))]])
+                
+                # 获取当前进程的样本子集
+                rank_indices = indices[self.rank:total_size:self.num_replicas].tolist()
+                bucket_indices = rank_indices
+            
             for idx in bucket_indices: #for a bucket, try to make batch
                 batch.append(idx)
                 if len(batch) == self.batch_size:
@@ -179,19 +248,33 @@ class BucketBatchSampler(Sampler):
             if not self.drop_last and batch: #if too small
                 yield batch  #yield last batch if drop_last is False
             # skip leftovers
-            elif batch:  #else store leftovers for the next epoch
-                # print("leftovers",batch)
+            elif batch and not self.distributed:  #else store leftovers for the next epoch
+                # 分布式模式下不保存leftovers，避免不同进程间数据不一致
                 self.leftover_items.extend(batch)  
 
     def __len__(self):
         #calculates total batches
-        total_batches = sum(len(indices) // self.batch_size for indices in self.bucket_indices.values())
-        #if using leftovers, append leftovers to total batches
-        if not self.drop_last:
-            leftovers = sum(len(indices) % self.batch_size for indices in self.bucket_indices.values())
-            total_batches += bool(leftovers)  #add one more batch if there are leftovers
-        return total_batches
+        if self.distributed:
+            total_samples = 0
+            for indices in self.bucket_indices.values():
+                # 计算每个进程应该处理的样本数量
+                num_samples_per_replica = int(math.ceil(len(indices) / self.num_replicas))
+                total_samples += num_samples_per_replica
+            
+            return total_samples // self.batch_size + (0 if self.drop_last or total_samples % self.batch_size == 0 else 1)
+        else:
+            total_batches = sum(len(indices) // self.batch_size for indices in self.bucket_indices.values())
+            #if using leftovers, append leftovers to total batches
+            if not self.drop_last:
+                leftovers = sum(len(indices) % self.batch_size for indices in self.bucket_indices.values())
+                total_batches += bool(leftovers)  #add one more batch if there are leftovers
+            return total_batches
     
+    def set_epoch(self, epoch):
+        """
+        设置当前epoch，用于分布式训练中的随机性控制
+        """
+        self.epoch = epoch
 
 ##input: datarows -> output: metadata
 #looks like leftover code from leftover_idx, check, then delete

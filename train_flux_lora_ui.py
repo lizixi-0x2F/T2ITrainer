@@ -1300,9 +1300,20 @@ def main(args):
     # create dataset based on input_dir
     train_dataset = CachedImageDataset(datarows,conditional_dropout_percent=args.caption_dropout)
 
+    # 获取分布式训练信息
+    is_distributed = accelerator.num_processes > 1
+    
     # referenced from everyDream discord minienglish1 shared script
     #create bucket batch sampler
-    bucket_batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True)
+    bucket_batch_sampler = BucketBatchSampler(
+        train_dataset, 
+        batch_size=args.train_batch_size, 
+        drop_last=True,
+        distributed=is_distributed,
+        num_replicas=accelerator.num_processes,
+        rank=accelerator.process_index,
+        seed=args.seed
+    )
 
     #initialize the DataLoader with the bucket batch sampler
     train_dataloader = torch.utils.data.DataLoader(
@@ -1311,6 +1322,12 @@ def main(args):
         collate_fn=collate_fn,
         num_workers=dataloader_num_workers,
     )
+    
+    # 确保多卡训练中的epoch同步
+    if is_distributed:
+        def set_epoch_fn(epoch):
+            bucket_batch_sampler.set_epoch(epoch)
+        accelerator.register_for_checkpointing(set_epoch_fn)
     
     
 
