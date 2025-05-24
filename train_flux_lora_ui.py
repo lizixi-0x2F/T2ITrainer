@@ -448,6 +448,11 @@ def parse_args(input_args=None):
         help="recreate all cache",
     )
     parser.add_argument(
+        "--auto_clear_cache",
+        action="store_true",
+        help="automatically clear cache files before training starts",
+    )
+    parser.add_argument(
         "--caption_dropout",
         type=float,
         default=0.1,
@@ -924,6 +929,36 @@ def main(args):
         datarows = []
         cache_list = []
         recreate_cache = args.recreate_cache
+        
+        # 自动清理缓存文件
+        if args.auto_clear_cache:
+            print("自动清理缓存文件...")
+            cache_patterns = [
+                os.path.join(input_dir, "**/*.npflux"),
+                os.path.join(input_dir, "**/*.npfluxlatent"),
+            ]
+            for pattern in cache_patterns:
+                cache_files = glob.glob(pattern, recursive=True)
+                for cache_file in cache_files:
+                    try:
+                        os.remove(cache_file)
+                        print(f"已删除缓存文件: {cache_file}")
+                    except Exception as e:
+                        print(f"删除缓存文件失败 {cache_file}: {e}")
+            
+            # 清理元数据文件
+            metadata_files = [
+                os.path.join(input_dir, f'metadata_{metadata_suffix}.json'),
+                os.path.join(input_dir, f'val_metadata_{metadata_suffix}.json')
+            ]
+            for metadata_file in metadata_files:
+                if os.path.exists(metadata_file):
+                    try:
+                        os.remove(metadata_file)
+                        print(f"已删除元数据文件: {metadata_file}")
+                    except Exception as e:
+                        print(f"删除元数据文件失败 {metadata_file}: {e}")
+            print("缓存清理完成!")
         # resolution = args.resolution_config.split(",")
         
         supported_image_types = ['.jpg','.jpeg','.png','.webp']
